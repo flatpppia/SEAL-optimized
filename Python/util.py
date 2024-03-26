@@ -8,6 +8,9 @@ import os
 import networkx as nx
 import pdb
 import argparse
+import scipy.sparse as ssp
+import time
+import multiprocessing as mp
 
 # 这里的参数用于main.py中，与Mainh.py
 cmd_opt = argparse.ArgumentParser(description='Argparser for graph_classification')
@@ -32,6 +35,7 @@ cmd_opt.add_argument('-learning_rate', type=float, default=0.0001, help='init le
 cmd_opt.add_argument('-dropout', type=bool, default=False, help='whether add dropout after dense layer')
 cmd_opt.add_argument('-printAUC', type=bool, default=False, help='whether to print AUC (for binary classification only)')
 cmd_opt.add_argument('-extract_features', type=bool, default=False, help='whether to extract final graph features')
+cmd_opt.add_argument('-pool_kind', type=str, default='sort', help='which pooling to use')
 
 cmd_args, _ = cmd_opt.parse_known_args()
 
@@ -40,8 +44,18 @@ if len(cmd_args.latent_dim) == 1:
     cmd_args.latent_dim = cmd_args.latent_dim[0]
 
 
+def neighbors(fringe, A):
+    # find all 1-hop neighbors of nodes in fringe from A
+    res = set()
+    for node in fringe:
+        nei, _, _ = ssp.find(A[:, node])
+        nei = set(nei)
+        res = res.union(nei)
+    return res
+
+
 class GNNGraph(object):  # 作用为构建图
-    def __init__(self, g, label, link_label, node_tags=None, node_features=None):
+    def __init__(self, g, label, link_label, sub_label, node_tags=None, node_features=None):
         """
         g: a networkx graph
         label: an integer graph label
@@ -49,8 +63,9 @@ class GNNGraph(object):  # 作用为构建图
         node_features: a numpy array of continuous node features
         """
         self.num_nodes = len(node_tags)
-        self.label = label
-        self.link_label = link_label
+        self.label = label  # 记录的是这张子图的正、负样本性
+        self.link_label = link_label  # 记录的是连边同质异质性
+        self.sub_label = sub_label  # 记录的是子图所有节点的类标
         self.node_tags = node_tags
         self.node_features = node_features  # numpy array (node_num * feature_dim)
         self.degs = list(dict(g.degree).values())
@@ -61,7 +76,7 @@ class GNNGraph(object):  # 作用为构建图
             self.edge_pairs = np.ndarray(shape=(self.num_edges, 2), dtype=np.int32)
             self.edge_pairs[:, 0] = x
             self.edge_pairs[:, 1] = y
-            self.edge_pairs = self.edge_pairs.flatten()
+            self.edge_pairs = self.edge_pairs.flatten()  # 把edge_pairs降维展开,默认从0维开始展开
         else:
             self.num_edges = 0
             self.edge_pairs = np.array([])
@@ -80,7 +95,58 @@ class GNNGraph(object):  # 作用为构建图
                 self.edge_features.append(edge_features[edge])
                 self.edge_features.append(edge_features[edge])  # add reversed edges
             self.edge_features = np.concatenate(self.edge_features, 0)
+    '''
+    def get_neighbors(self, tar_node):
+        size = self.num_nodes
+        row0 = self.edge_pairs[1::2]
+        col0 = self.edge_pairs[0::2]
+        row = np.concatenate((row0, col0))
+        col = np.concatenate((col0, row0))  # 这样拼一下矩阵才是实对称
+        data = np.ones(len(row))
+        subg = ssp.csc_matrix((data, (row, col)), shape=[size, size])
+        n_nei1 = neighbors(tar_node, subg)  # 获取节点的一阶邻居
+        n_nei2 = neighbors(n_nei1, subg) - n_nei1 - set(tar_node)  # 获取节点的二阶邻居
 
+        return n_nei1, n_nei2
+
+    def node_heter(self, tar_node, node_list, label_list):
+        number_het = 0
+        for i in range(len(node_list)):
+            if label_list[tar_node[0]] != label_list[node_list[i]]:
+                number_het += 1  # 统计出异质邻居节点数量
+        if len(node_list) != 0:
+            het_ratio = number_het / len(node_list)
+        else:
+            het_ratio = 0
+
+        return np.array([number_het, het_ratio])
+
+    def get_vec(self, tar_node):
+        node_nei1, node_nei2 = self.get_neighbors(tar_node)
+        first_order_h = self.node_heter(tar_node, list(node_nei1), self.sub_label)
+        h_vector = first_order_h
+        second_order_h = self.node_heter(tar_node, list(node_nei2), self.sub_label)
+        h_vector = np.concatenate((h_vector, second_order_h))
+
+        return h_vector
+
+    def cal_heter(self):
+        total_h_v = np.empty([self.num_nodes, 4])
+        for i in range(self.num_nodes):
+            h_v = self.get_vec([i])
+            total_h_v[i] = h_v
+
+        return total_h_v
+
+    def replace_f(self):
+        print('subg id:', id(self))
+        subg_node_h_vec = self.cal_heter(self)
+
+        return subg_node_h_vec
+    
+    def replace(self):
+        self.node_features=self.replace_f()
+    '''
 
 # 这个读数据的函数目前Mainh.py没用上
 def load_data():

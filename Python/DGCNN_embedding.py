@@ -22,7 +22,7 @@ from lib.pytorch_util import weights_init, gnn_spmm
 
 class DGCNN(nn.Module):
     def __init__(self, output_dim, num_node_feats, num_edge_feats, latent_dim=[32, 32, 32, 1], k=30,
-                 conv1d_channels=[16, 32], conv1d_kws=[0, 5], conv1d_activation='ReLU'):
+                 conv1d_channels=[16, 32], conv1d_kws=[0, 5], pool_kind='sort', conv1d_activation='ReLU'):
         print('Initializing DGCNN')
         super(DGCNN, self).__init__()
         self.latent_dim = latent_dim
@@ -30,17 +30,19 @@ class DGCNN(nn.Module):
         self.num_node_feats = num_node_feats
         self.num_edge_feats = num_edge_feats
         self.k = k
-        self.total_latent_dim = sum(latent_dim)
+        self.total_latent_dim = sum(latent_dim)  # 97
         conv1d_kws[0] = self.total_latent_dim
 
         self.conv_params = nn.ModuleList()
         self.conv_params.append(nn.Linear(num_node_feats + num_edge_feats, latent_dim[0]))
-        for i in range(1, len(latent_dim)):
+        # Linear定义一个神经网络的线性层, 参数按顺序为输入神经元个数和输出神经元个数
+        for i in range(1, len(latent_dim)):  # len(latent_dim)=4
             self.conv_params.append(nn.Linear(latent_dim[i-1], latent_dim[i]))
+            # conv_params是一个专门的列表, 存放了4个定义好的线性层, 其输入输出维度分别是[num_n_f + num_e_f,32],[32,32],[32,32],[32,1]
 
-        self.conv1d_params1 = nn.Conv1d(1, conv1d_channels[0], conv1d_kws[0], conv1d_kws[0])
-        self.maxpool1d = nn.MaxPool1d(2, 2)
-        self.conv1d_params2 = nn.Conv1d(conv1d_channels[0], conv1d_channels[1], conv1d_kws[1], 1)
+        self.conv1d_params1 = nn.Conv1d(1, conv1d_channels[0], conv1d_kws[0], conv1d_kws[0])  # 输入维度1,输出维度16,卷积核97*1,步长97
+        self.maxpool1d = nn.MaxPool1d(2, 2)  # 窗口大小2,步长2
+        self.conv1d_params2 = nn.Conv1d(conv1d_channels[0], conv1d_channels[1], conv1d_kws[1], 1)  # 输入16,输出32,卷积核5*16,步长1
 
         dense_dim = int((k - 2) / 2 + 1)
         self.dense_dim = (dense_dim - conv1d_kws[1] + 1) * conv1d_channels[1]
@@ -55,6 +57,7 @@ class DGCNN(nn.Module):
         weights_init(self)
 
         self.poolConv = GCNConv(self.total_latent_dim, 1)
+        self.pkind = pool_kind
 
     def forward(self, graph_list, node_feat, edge_feat):#, batch):
         graph_sizes = [graph_list[i].num_nodes for i in range(len(graph_list))]
@@ -71,11 +74,16 @@ class DGCNN(nn.Module):
         edge_index = torch.cat([edge1, edge2], 0)
         '''
         edge1 = graph_list[0].edge_pairs[0::2]
+        # print('edge1:', len(edge1))
         edge2 = graph_list[0].edge_pairs[1::2]
+        # print('edge2:', len(edge2))
         # time.sleep(100)
         for m in range(1, len(graph_list)):
             edge1 = np.append(edge1, graph_list[m].edge_pairs[0::2])
+            # print('edge1:', len(edge1))
             edge2 = np.append(edge2, graph_list[m].edge_pairs[1::2])
+            # print('edge2:', len(edge2))
+        # time.sleep(100)
         edge1 = torch.LongTensor(np.array([edge1]))
         edge2 = torch.LongTensor(np.array([edge2]))
         edge_index = torch.cat([edge1, edge2], 0)  # 每个子图含有graph_list[m].num_edges条连边
@@ -103,8 +111,10 @@ class DGCNN(nn.Module):
         node_degs = Variable(node_degs)
         edge_index = Variable(edge_index)
 
-        h = self.sortpooling_embedding(node_feat, edge_feat, n2n_sp, e2n_sp, subg_sp, graph_sizes, node_degs)
-        # h = self.attpooling_embedding(node_feat, edge_feat, edge_index, num_edges_set, n2n_sp, e2n_sp, subg_sp, graph_sizes, node_degs)
+        if self.pkind == 'sort':
+            h = self.sortpooling_embedding(node_feat, edge_feat, n2n_sp, e2n_sp, subg_sp, graph_sizes, node_degs)
+        elif self.pkind == 'att':
+            h = self.attpooling_embedding(node_feat, edge_feat, edge_index, num_edges_set, n2n_sp, e2n_sp, subg_sp, graph_sizes, node_degs)
 
         return h
 
@@ -122,15 +132,15 @@ class DGCNN(nn.Module):
         lv = 0
         cur_message_layer = node_feat
         cat_message_layers = []
-        while lv < len(self.latent_dim):
+        while lv < len(self.latent_dim):  # 利用4次循环和conv_params里的4个线性层, 每次循环后的cur_mes_l不仅存进列表还会用到下一次里去
             # gnn_spmm就是矩阵乘法
+            # 1次循环后,node_linear维度为[xxxx, 32]; 2次后,[xxxx,32]; 3,[xxxx,32]; 4,[xxxx,1]
             n2npool = gnn_spmm(n2n_sp, cur_message_layer) + cur_message_layer  # Y = (A + I) * X = AX+X
-            node_linear = self.conv_params[lv](n2npool)  # Y = Y * W
+            node_linear = self.conv_params[lv](n2npool)  # Y = Y * W W矩阵藏在Linear里, 维度为[Y.size()[1], latent_dim(i)]
             normalized_linear = node_linear.div(node_degs)  # Y = D^-1 * Y
             cur_message_layer = torch.tanh(normalized_linear)
             cat_message_layers.append(cur_message_layer)
             lv += 1
-
         cur_message_layer = torch.cat(cat_message_layers, 1)  # 将layers中的张量按第1维度进行拼接,如两个size为[2,3]的张量拼成一个[2,6]
         # print(cur_message_layer.size())  # torch.Size([xxxx, 97]) xxxx与前面的node_feat一致
 
@@ -143,15 +153,13 @@ class DGCNN(nn.Module):
         batch_sortpooling_graphs = Variable(batch_sortpooling_graphs)  # 将Tensor转换为Variable之后，可以装载梯度信息
 
         accum_count = 0
-        for i in range(subg_sp.size()[0]):  # subg_sp,torch.Size([128, 10844])
+        for i in range(subg_sp.size()[0]):  # subg_sp, Size([128, 10844])
             to_sort = sort_channel[accum_count: accum_count + graph_sizes[i]]
             k = self.k if self.k <= graph_sizes[i] else graph_sizes[i]
             _, topk_indices = to_sort.topk(k)  # torch.Tensor
-            # print(topk_indices)
             '''tensor.int64([ 3, 64, 28, 35,  7, ......13, 65, 78], device='cuda:0')'''
             topk_indices += accum_count
-            # print(topk_indices)
-            sortpooling_graph = cur_message_layer.index_select(0, topk_indices)  # _select最后生成的张量总维度不变,0代表选择维度
+            sortpooling_graph = cur_message_layer.index_select(0, topk_indices)  # select生成的张量除目标维度之外的维度不变,这里0是目标维度
             # 如果图的大小<k, 就会把缺的部分用0补齐
             if k < self.k:
                 to_pad = torch.zeros(self.k-k, self.total_latent_dim)
@@ -165,12 +173,11 @@ class DGCNN(nn.Module):
         """traditional 1d convlution and dense layers"""
         to_conv1d = batch_sortpooling_graphs.view((-1, 1, self.k * self.total_latent_dim))
         # print(to_conv1d.size())  # torch.Size([128, 1, 5238])
-        # time.sleep(99)
-        conv1d_res = self.conv1d_params1(to_conv1d)
-        conv1d_res = self.conv1d_activation(conv1d_res)
-        conv1d_res = self.maxpool1d(conv1d_res)
-        conv1d_res = self.conv1d_params2(conv1d_res)
-        conv1d_res = self.conv1d_activation(conv1d_res)
+        conv1d_res = self.conv1d_params1(to_conv1d)  # [,16]
+        conv1d_res = self.conv1d_activation(conv1d_res)  # Relu
+        conv1d_res = self.maxpool1d(conv1d_res)  # [2,2]
+        conv1d_res = self.conv1d_params2(conv1d_res)  # [16,32]
+        conv1d_res = self.conv1d_activation(conv1d_res)  # Relu
         to_dense = conv1d_res.view(len(graph_sizes), -1)
 
         if self.output_dim > 0:

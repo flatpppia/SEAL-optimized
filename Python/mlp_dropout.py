@@ -75,11 +75,12 @@ class MLPClassifier(nn.Module):
             pred = logits.data.max(1, keepdim=True)[1]  # 括号里的1代表查找第二维中的最大值，keepdim=true是对应维度被变成1
             # print(pred.size())  # torch.Size([128, 1])
             yizhi_zheng_ind = [i for i in range(x.size()[0]) if y[i] == 1 and z[i] == 0]
+            ratio = 0
             if len(yizhi_zheng_ind) != 0:
                 yz_logits = logits[yizhi_zheng_ind]
                 yz_y = y[yizhi_zheng_ind]
                 yz_loss = F.nll_loss(yz_logits, yz_y)
-                total_loss = 0.7 * total_loss + 0.3 * yz_loss
+                total_loss = (1-ratio) * total_loss + ratio * yz_loss
             # eq()函数作用为返回一个和pred相同大小的tensor, 与目标值相等的位置为T, 其余为F
             pred_result = pred.eq(y.data.view_as(pred))
             # print(pred.eq(y.data.view_as(pred)))

@@ -33,9 +33,10 @@ class Classifier(nn.Module):
                             output_dim=cmd_args.out_dim,
                             num_node_feats=cmd_args.feat_dim+cmd_args.attr_dim,
                             num_edge_feats=cmd_args.edge_feat_dim,
-                            k=cmd_args.sortpooling_k, 
+                            k=cmd_args.sortpooling_k,
+                            pool_kind=cmd_args.pool_kind,
                             conv1d_activation=cmd_args.conv1d_activation)
-            # print(self.gnn)
+            print(cmd_args.pool_kind)
         out_dim = cmd_args.out_dim
         # print("outdim:", out_dim)  # 0
         if out_dim == 0:
@@ -247,6 +248,64 @@ def loop_dataset(g_list, classifier, sample_idxes, optimizer=None, bsize=cmd_arg
     else:
         avg_loss = np.concatenate((avg_loss, [0.0]))
     
+    return avg_loss, total_p_result
+
+
+def new_loop_dataset(g_list, classifier, sample_idxes, optimizer=None, bsize=cmd_args.batch_size):
+    total_loss = []
+    total_iters = (len(sample_idxes) + (bsize - 1) * (optimizer is None)) // bsize
+    pbar = tqdm(range(total_iters), unit='batch')
+    all_targets = []
+    all_scores = []
+
+    n_samples = 0
+    total_p_result = []
+    for pos in pbar:
+        selected_idx = sample_idxes[pos * bsize: (pos + 1) * bsize]  # 每次选择一个batchsize的量
+
+        batch_graph = [g_list[idx] for idx in selected_idx]
+        targets = [g_list[idx].label for idx in selected_idx]
+        all_targets += targets
+        if classifier.regression:
+            pred, mae, loss = classifier(batch_graph)
+            all_scores.append(pred.cpu().detach())  # for binary classification
+        else:
+            logits, loss, acc, pre_result = classifier(batch_graph)
+            pre_result = pre_result.cpu().numpy().tolist()
+            total_p_result += pre_result
+            all_scores.append(logits[:, 1].cpu().detach())  # for binary classification
+
+        if optimizer is not None:
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        loss = loss.data.cpu().detach().numpy()
+        if classifier.regression:
+            pbar.set_description('MSE_loss: %0.5f MAE_loss: %0.5f' % (loss, mae))
+            total_loss.append(np.array([loss, mae]) * len(selected_idx))
+        else:
+            pbar.update(1)
+            pbar.set_description('Loss: %0.5f Acc: %0.5f' % (loss, acc))
+            total_loss.append(np.array([loss, acc]) * len(selected_idx))
+
+        n_samples += len(selected_idx)
+
+    if optimizer is None:
+        assert n_samples == len(sample_idxes)
+    total_loss = np.array(total_loss)
+    avg_loss = np.sum(total_loss, 0) / n_samples
+    all_scores = torch.cat(all_scores).cpu().numpy()
+
+    if not classifier.regression and cmd_args.printAUC:
+        all_targets = np.array(all_targets)
+        fpr, tpr, _ = metrics.roc_curve(all_targets, all_scores, pos_label=1)
+        auc = metrics.auc(fpr, tpr)
+        ap = metrics.average_precision_score(all_targets, all_scores)
+        avg_loss = np.concatenate((avg_loss, [auc], [ap]))
+    else:
+        avg_loss = np.concatenate((avg_loss, [0.0]))
+
     return avg_loss, total_p_result
 
 '''

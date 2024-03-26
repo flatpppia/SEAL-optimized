@@ -4,6 +4,8 @@ import csv
 import json
 import scipy
 import copy
+from sklearn.preprocessing import label_binarize
+
 
 def rand_train_test_idx(label, train_prop=0.5, valid_prop=0.25, ignore_negative=True):
     """ randomly splits label into train/valid/test splits """
@@ -136,6 +138,40 @@ def load_twitch_dataset(lang):
     dataset.graph = {'adj': A,
                      'edge_index': edge_index,
                      'edge_num': edge_index.size()[1],
+                     'edge_feat': None,
+                     'node_feat': node_feat,
+                     'num_nodes': num_nodes}
+    dataset.label = torch.tensor(label)
+    return dataset
+
+
+def load_fb100(filename):
+    mat = scipy.io.loadmat('data/facebook100/' + filename + '.mat')
+    A = mat['A']  # <class 'scipy.sparse._csc.csc_matrix'>
+    metadata = mat['local_info']
+    return A, metadata
+
+
+def load_fb100_dataset(filename):
+    A, metadata = load_fb100(filename)
+    dataset = NCDataset(filename)
+    edge_index = torch.tensor(A.nonzero(), dtype=torch.long)
+    metadata = metadata.astype(np.int)
+    label = metadata[:, 1] - 1  # gender label, -1 means unlabeled
+
+    # make features into one-hot encodings
+    feature_vals = np.hstack(
+        (np.expand_dims(metadata[:, 0], 1), metadata[:, 2:]))
+    features = np.empty((A.shape[0], 0))
+    for col in range(feature_vals.shape[1]):
+        feat_col = feature_vals[:, col]
+        feat_onehot = label_binarize(feat_col, classes=np.unique(feat_col))
+        features = np.hstack((features, feat_onehot))
+
+    node_feat = torch.tensor(features, dtype=torch.float)
+    num_nodes = metadata.shape[0]
+    dataset.graph = {'adj': A,
+                     'edge_index': edge_index,
                      'edge_feat': None,
                      'node_feat': node_feat,
                      'num_nodes': num_nodes}
